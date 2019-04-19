@@ -8,9 +8,10 @@ import config
 from util import *
 import paths
 
-class BaselineLstm(nn.Module):
+class OhLstm(nn.Module):
+    '''https://arxiv.org/pdf/1602.02373.pdf lstm+global pooling'''
     def __init__(self, vocab_size, embed_size, hidden_size, output_dim, nlayers, bidirectional, lstm_dropout, dropout, pad_idx, train_embedding=True):
-        super(BaselineLstm, self).__init__()
+        super(OhLstm, self).__init__()
         # input padding index to embedding to prevent training embedding for paddings
         self.embedding = nn.Embedding(vocab_size, embed_size, padding_idx = pad_idx)
         if not train_embedding:
@@ -21,6 +22,7 @@ class BaselineLstm(nn.Module):
                            bidirectional=bidirectional, 
                            dropout=lstm_dropout)
         self.fc = nn.Linear(hidden_size * 2, output_dim)
+        self.globalpooling = nn.AdaptiveAvgPool2d((1,None))
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, text, text_lengths, testing=False):
@@ -28,16 +30,19 @@ class BaselineLstm(nn.Module):
             # if we are predicting for test set
             text, text_lengths, reverse_order = self.collate_lines_for_test(text, text_lengths)
         # [sent len, batch size]
-        embedded = self.dropout(self.embedding(text)) #[sent len, batch size, emb dim]
+        embedded = self.embedding(text) #[sent len, batch size, emb dim]
+        embedded = self.dropout(embedded)
         packed_embedded = nn.utils.rnn.pack_padded_sequence(embedded, text_lengths)
         packed_output, (hidden, cell) = self.lstm(packed_embedded)
 #         #unpack sequence
-#         output, output_lengths = nn.utils.rnn.pad_packed_sequence(packed_output) # [sent len, batch size, hid dim * num directions]
+        output, output_lengths = nn.utils.rnn.pad_packed_sequence(packed_output) # [sent len, batch size, hid dim * num directions]
+        output_for_pooling = output.permute(1,0,2) # [batch size, sent len, hid dim * num directions]
+        pooled = self.dropout(self.globalpooling(output_for_pooling)) # [batch size, 1, hid dim * num directions]
         # [forward_layer_0, backward_layer_0, forward_layer_1, backward_layer 1, ..., forward_layer_n, backward_layer n]
         # use the top two hidden layers 
 #         hidden = self.dropout(torch.cat((hidden[-2,:,:], hidden[-1,:,:]), dim = 1))
-        hidden = torch.cat((hidden[-2,:,:], hidden[-1,:,:]), dim = 1)
-        y_hat = self.fc(hidden.squeeze(0))
+#         hidden = torch.cat((hidden[-2,:,:], hidden[-1,:,:]), dim = 1)
+        y_hat = self.fc(pooled.squeeze(1))
         if testing:
             y_hat = y_hat[reverse_order]
         return y_hat

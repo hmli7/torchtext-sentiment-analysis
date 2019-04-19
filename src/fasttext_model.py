@@ -1,4 +1,5 @@
 import torch.nn as nn
+import torch.nn.functional as F
 import time
 import os
 import sys
@@ -8,19 +9,15 @@ import config
 from util import *
 import paths
 
-class BaselineLstm(nn.Module):
-    def __init__(self, vocab_size, embed_size, hidden_size, output_dim, nlayers, bidirectional, lstm_dropout, dropout, pad_idx, train_embedding=True):
-        super(BaselineLstm, self).__init__()
+class Fasttext(nn.Module):
+    '''https://arxiv.org/pdf/1602.02373.pdf lstm+global pooling'''
+    def __init__(self, vocab_size, embed_size, output_dim, dropout, pad_idx, train_embedding=True):
+        super(Fasttext, self).__init__()
         # input padding index to embedding to prevent training embedding for paddings
         self.embedding = nn.Embedding(vocab_size, embed_size, padding_idx = pad_idx)
         if not train_embedding:
             self.embedding.weight.requires_grad = False # make embedding non trainable
-        self.lstm = nn.LSTM(embed_size, 
-                           hidden_size, 
-                           num_layers=nlayers, 
-                           bidirectional=bidirectional, 
-                           dropout=lstm_dropout)
-        self.fc = nn.Linear(hidden_size * 2, output_dim)
+        self.fc = nn.Linear(embed_size, output_dim)
         self.dropout = nn.Dropout(dropout)
         
     def forward(self, text, text_lengths, testing=False):
@@ -29,15 +26,9 @@ class BaselineLstm(nn.Module):
             text, text_lengths, reverse_order = self.collate_lines_for_test(text, text_lengths)
         # [sent len, batch size]
         embedded = self.dropout(self.embedding(text)) #[sent len, batch size, emb dim]
-        packed_embedded = nn.utils.rnn.pack_padded_sequence(embedded, text_lengths)
-        packed_output, (hidden, cell) = self.lstm(packed_embedded)
-#         #unpack sequence
-#         output, output_lengths = nn.utils.rnn.pad_packed_sequence(packed_output) # [sent len, batch size, hid dim * num directions]
-        # [forward_layer_0, backward_layer_0, forward_layer_1, backward_layer 1, ..., forward_layer_n, backward_layer n]
-        # use the top two hidden layers 
-#         hidden = self.dropout(torch.cat((hidden[-2,:,:], hidden[-1,:,:]), dim = 1))
-        hidden = torch.cat((hidden[-2,:,:], hidden[-1,:,:]), dim = 1)
-        y_hat = self.fc(hidden.squeeze(0))
+        embedded = embedded.permute(1, 0, 2)
+        pooled = F.avg_pool2d(embedded, (embedded.shape[1], 1))
+        y_hat = self.fc(pooled.squeeze(1))
         if testing:
             y_hat = y_hat[reverse_order]
         return y_hat

@@ -8,12 +8,13 @@ import config
 from util import *
 import paths
 
-
 class BaselineLstm(nn.Module):
-    def __init__(self, vocab_size, embed_size, hidden_size, output_dim, nlayers, bidirectional, lstm_dropout, dropout, pad_idx):
+    def __init__(self, vocab_size, embed_size, hidden_size, output_dim, nlayers, bidirectional, lstm_dropout, dropout, pad_idx, train_embedding=True):
         super(BaselineLstm, self).__init__()
         # input padding index to embedding to prevent training embedding for paddings
         self.embedding = nn.Embedding(vocab_size, embed_size, padding_idx = pad_idx)
+        if not train_embedding:
+            self.embedding.weight.requires_grad = False # make embedding non trainable
         self.lstm = nn.LSTM(embed_size, 
                            hidden_size, 
                            num_layers=nlayers, 
@@ -21,8 +22,11 @@ class BaselineLstm(nn.Module):
                            dropout=lstm_dropout)
         self.fc = nn.Linear(hidden_size * 2, output_dim)
         self.dropout = nn.Dropout(dropout)
-    def forward(self, text, text_lengths):
         
+    def forward(self, text, text_lengths, testing=False):
+        if testing:
+            # if we are predicting for test set
+            text, text_lengths, reverse_order = self.collate_lines_for_test(text, text_lengths)
         # [sent len, batch size]
         embedded = self.dropout(self.embedding(text)) #[sent len, batch size, emb dim]
         packed_embedded = nn.utils.rnn.pack_padded_sequence(embedded, text_lengths)
@@ -31,8 +35,24 @@ class BaselineLstm(nn.Module):
 #         output, output_lengths = nn.utils.rnn.pad_packed_sequence(packed_output) # [sent len, batch size, hid dim * num directions]
         # [forward_layer_0, backward_layer_0, forward_layer_1, backward_layer 1, ..., forward_layer_n, backward_layer n]
         # use the top two hidden layers 
-        hidden = self.dropout(torch.cat((hidden[-2,:,:], hidden[-1,:,:]), dim = 1))
-        return self.fc(hidden.squeeze(0))
+#         hidden = self.dropout(torch.cat((hidden[-2,:,:], hidden[-1,:,:]), dim = 1))
+        hidden = torch.cat((hidden[-2,:,:], hidden[-1,:,:]), dim = 1)
+        y_hat = self.fc(hidden.squeeze(0))
+        if testing:
+            y_hat = y_hat[reverse_order]
+        return y_hat
+    
+    # collate fn lets you control the return value of each batch
+    # for packed_seqs, you want to return your data sorted by length
+    def collate_lines_for_test(self, seq_list, lens):
+        inputs = seq_list.permute(1,0).cpu().numpy()
+    #     lens = [len(seq) for seq in inputs]
+        # sort by length
+        seq_order = sorted(range(len(lens)), key=lens.__getitem__, reverse=True)
+        ordered_inputs = torch.tensor([inputs[i] for i in seq_order]).permute(1,0).cuda()
+        ordered_seq_lens = torch.tensor([lens[i] for i in seq_order]).cuda()
+        reverse_order = sorted(range(len(lens)), key=seq_order.__getitem__, reverse=False)
+        return ordered_inputs, ordered_seq_lens, reverse_order
     
 def run(model, optimizer, criterion, train_dataloader, valid_dataloader, best_epoch, best_vali_loss, DEVICE, start_epoch=None):
     best_eval = None
@@ -56,7 +76,8 @@ def run(model, optimizer, criterion, train_dataloader, valid_dataloader, best_ep
         for idx, batch in enumerate(train_dataloader): # lists, presorted, preloaded on GPU
             optimizer.zero_grad()
             text, text_lengths = batch.text
-            predictions = model(text, text_lengths).squeeze(1)
+            predictions = model(text, text_lengths, testing=False)
+            predictions = predictions.squeeze(1) if len(predictions.size())>1 else predictions # prepare for batch size == 1
             loss = criterion.forward(predictions, batch.label)
             acc = binary_accuracy(predictions, batch.label)
 
@@ -65,8 +86,8 @@ def run(model, optimizer, criterion, train_dataloader, valid_dataloader, best_ep
             avg_loss += loss.item()
             avg_acc += acc.item()
             
-            if idx%50 == 49:
-                print_file_and_screen('Epoch: {}\tBatch: {}\tAvg-Loss: {:.4f}\tAvg-Acc: {:.4f}'.format(epoch, idx+1, avg_loss/50 ,avg_acc/50), f = f)
+            if idx%200 == 199:
+                print_file_and_screen('Epoch: {}\tBatch: {}\tAvg-Loss: {:.4f}\tAvg-Acc: {:.4f}'.format(epoch, idx+1, avg_loss/200 ,avg_acc/200), f = f)
                 avg_loss = 0.0
                 avg_acc = 0.0
             # clear memory
@@ -116,7 +137,8 @@ def test_validation(model, criterion, valid_dataloader):
     avg_acc = 0.0
     for idx, batch in enumerate(valid_dataloader):
         text, text_lengths = batch.text
-        predictions = model(text, text_lengths).squeeze(1)
+        predictions = model(text, text_lengths, testing=False)
+        predictions = predictions.squeeze(1) if len(predictions.size())>1 else predictions # prepare for batch size == 1
         loss = criterion.forward(predictions, batch.label)
         acc = binary_accuracy(predictions, batch.label)
         avg_loss += loss.item()
@@ -134,14 +156,17 @@ def binary_accuracy(preds, y):
     acc = correct.sum() / len(correct)
     return acc
 
-def predict(model, test_dataloader):
+def predict(model, test_dataloader, DEVICE):
+    model.to(DEVICE)
     with torch.no_grad():
         model.eval()
         prediction = []
         for i, batch in enumerate(test_dataloader):
-            if i%100 == 0:
-                    print(i)
+            if i%400 == 0:
+                print(i)
             text, text_lengths = batch.text
-            predictions_batch = model(text, text_lengths).squeeze(1)
-            prediction.append(predictions_batch)
-    return prediction
+            predictions_batch = model(text, text_lengths, testing=True)
+            predictions_batch = predictions_batch.squeeze(1) if len(predictions_batch.size())>1 else predictions_batch # prepare for batch size == 1
+            rounded_preds = torch.round(torch.sigmoid(predictions_batch))
+            prediction.append(rounded_preds)
+    return torch.cat(prediction, dim=0).cpu().numpy()

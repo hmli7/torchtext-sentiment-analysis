@@ -8,7 +8,7 @@ nclasses = 10
 # Training parameters
 lr = 0.001
 weight_decay = 0.0001
-batch_size = 32
+batch_size = 2
 test_batch_size = 1
 max_epoch = 30
 start_epoch = 0
