@@ -1,4 +1,6 @@
 import torch.nn as nn
+import torch.nn.functional as F
+
 import time
 import os
 import sys
@@ -8,10 +10,10 @@ import config
 from util import *
 import paths
 
-class OhLstm(nn.Module):
+class ResidualLstm(nn.Module):
     '''https://arxiv.org/pdf/1602.02373.pdf lstm+global pooling'''
-    def __init__(self, vocab_size, embed_size, hidden_size, output_dim, nlayers, bidirectional, lstm_dropout, dropout, pad_idx, train_embedding=True):
-        super(OhLstm, self).__init__()
+    def __init__(self, vocab_size, embed_size, hidden_size, output_dim, nlayers, bidirectional, lstm_dropout, dropout1,dropout2, dropout3, pad_idx, train_embedding=True):
+        super(ResidualLstm, self).__init__()
         # input padding index to embedding to prevent training embedding for paddings
         self.embedding = nn.Embedding(vocab_size, embed_size, padding_idx = pad_idx)
         if not train_embedding:
@@ -21,30 +23,35 @@ class OhLstm(nn.Module):
                            num_layers=nlayers, 
                            bidirectional=bidirectional, 
                            dropout=lstm_dropout)
-        self.fc = nn.Linear(hidden_size * 2, output_dim)
+        self.fc = nn.Linear(hidden_size * 2 + embed_size, output_dim)
         self.globalpooling = nn.AdaptiveAvgPool2d((1,None))
-        self.dropout = nn.Dropout(dropout)
+        self.dropout1 = nn.Dropout(dropout1)
+        self.dropout2 = nn.Dropout(dropout2)
+        self.dropout3 = nn.Dropout(dropout3)
         
     def forward(self, text, text_lengths, testing=False):
+        # text already padded by iterator
         if testing:
             # if we are predicting for test set
             text, text_lengths, reverse_order = self.collate_lines_for_test(text, text_lengths)
         # [sent len, batch size]
         embedded = self.embedding(text) #[sent len, batch size, emb dim]
-        embedded = self.dropout(embedded)
+        embedded = self.dropout1(embedded)
         packed_embedded = nn.utils.rnn.pack_padded_sequence(embedded, text_lengths)
         packed_output, (hidden, cell) = self.lstm(packed_embedded)
 #         #unpack sequence
         output, output_lengths = nn.utils.rnn.pad_packed_sequence(packed_output) # [sent len, batch size, hid dim * num directions]
-        output_for_pooling = output.permute(1,0,2) # [batch size, sent len, hid dim * num directions]
-        pooled = self.dropout(self.globalpooling(output_for_pooling)) # [batch size, 1, hid dim * num directions]
-        # [forward_layer_0, backward_layer_0, forward_layer_1, backward_layer 1, ..., forward_layer_n, backward_layer n]
-        # use the top two hidden layers 
-#         hidden = self.dropout(torch.cat((hidden[-2,:,:], hidden[-1,:,:]), dim = 1))
-#         hidden = torch.cat((hidden[-2,:,:], hidden[-1,:,:]), dim = 1)
-        y_hat = self.fc(pooled.squeeze(1))
+        output_for_pooling = output.permute(1, 0, 2) # [batch size, sent len, hid dim * num directions]
+        pooled = self.globalpooling(output_for_pooling).squeeze(1) # [batch size, hid dim * num directions]
+        # residual block
+        residual_embedded = embedded.permute(1, 0, 2)
+        residual_pooled = F.avg_pool2d(residual_embedded, (residual_embedded.shape[1], 1)).squeeze(1) # [batch size, hiddim]
+        x = torch.cat([self.dropout2(pooled), self.dropout3(residual_pooled)], dim=1) #[batch size, hiddim * 3]
+        y_hat = self.fc(x)
+        y_hat_hat = torch.zeros_like(y_hat)
         if testing:
-            y_hat = y_hat[reverse_order]
+            y_hat_hat = y_hat[reverse_order]
+            return y_hat_hat
         return y_hat
     
     # collate fn lets you control the return value of each batch
@@ -57,9 +64,9 @@ class OhLstm(nn.Module):
         ordered_inputs = torch.tensor([inputs[i] for i in seq_order]).permute(1,0).cuda()
         ordered_seq_lens = torch.tensor([lens[i] for i in seq_order]).cuda()
         reverse_order = sorted(range(len(lens)), key=seq_order.__getitem__, reverse=False)
-        return ordered_inputs, ordered_seq_lens, reverse_order
+        return ordered_inputs, ordered_seq_lens, seq_order
     
-def run(model, optimizer, criterion, train_dataloader, valid_dataloader, best_epoch, best_vali_loss, DEVICE, start_epoch=None, model_prefix=config.model_prefix):
+def run(model, optimizer, criterion, train_dataloader, valid_dataloader, best_epoch, best_vali_loss, DEVICE, start_epoch=None,model_prefix=config.model_prefix):
     best_eval = None
     start_epoch = 0 if start_epoch is None else start_epoch
     max_epoch = config.max_epoch
@@ -163,15 +170,16 @@ def binary_accuracy(preds, y):
 
 def predict(model, test_dataloader, DEVICE):
     model.to(DEVICE)
-    with torch.no_grad():
-        model.eval()
-        prediction = []
-        for i, batch in enumerate(test_dataloader):
-            if i%400 == 0:
-                print(i)
-            text, text_lengths = batch.text
-            predictions_batch = model(text, text_lengths, testing=True)
-            predictions_batch = predictions_batch.squeeze(1) if len(predictions_batch.size())>1 else predictions_batch # prepare for batch size == 1
-            rounded_preds = torch.round(torch.sigmoid(predictions_batch))
-            prediction.append(rounded_preds)
-    return torch.cat(prediction, dim=0).cpu().numpy()
+    model.eval()
+    prediction = []
+    for i, batch in enumerate(test_dataloader):
+        if i%400 == 0:
+            print(i)
+        text, text_lengths = batch.text
+        predictions_batch = model(text, text_lengths, testing=True)
+        predictions_batch = predictions_batch.squeeze(1) if len(predictions_batch.size())>1 else predictions_batch # prepare for batch size == 1
+        rounded_preds = torch.round(torch.sigmoid(predictions_batch))
+#         rounded_preds = np.round(1 / (1 + np.exp(-predictions_batch.detach().cpu().numpy())))
+        prediction.append(rounded_preds)
+#     return np.hstack(prediction)
+    return torch.cat(prediction, dim=0).detach().cpu().numpy()

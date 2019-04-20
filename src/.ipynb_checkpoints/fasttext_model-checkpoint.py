@@ -11,39 +11,23 @@ import paths
 
 class Fasttext(nn.Module):
     '''https://arxiv.org/pdf/1602.02373.pdf lstm+global pooling'''
-    def __init__(self, vocab_size, embed_size, output_dim, dropout, pad_idx, train_embedding=True):
+    def __init__(self, vocab_size, embed_size, output_dim, dropout1, dropout2, pad_idx, train_embedding=True):
         super(Fasttext, self).__init__()
         # input padding index to embedding to prevent training embedding for paddings
         self.embedding = nn.Embedding(vocab_size, embed_size, padding_idx = pad_idx)
         if not train_embedding:
             self.embedding.weight.requires_grad = False # make embedding non trainable
         self.fc = nn.Linear(embed_size, output_dim)
-        self.dropout = nn.Dropout(dropout)
-        
+        self.dropout1 = nn.Dropout(dropout1)
+        self.dropout2 = nn.Dropout(dropout2)
     def forward(self, text, text_lengths, testing=False):
-        if testing:
-            # if we are predicting for test set
-            text, text_lengths, reverse_order = self.collate_lines_for_test(text, text_lengths)
         # [sent len, batch size]
-        embedded = self.dropout(self.embedding(text)) #[sent len, batch size, emb dim]
+        embedded = self.dropout1(self.embedding(text)) #[sent len, batch size, emb dim]
         embedded = embedded.permute(1, 0, 2)
-        pooled = F.avg_pool2d(embedded, (embedded.shape[1], 1))
+        pooled = self.dropout2(F.avg_pool2d(embedded, (embedded.shape[1], 1)))
         y_hat = self.fc(pooled.squeeze(1))
-        if testing:
-            y_hat = y_hat[reverse_order]
         return y_hat
     
-    # collate fn lets you control the return value of each batch
-    # for packed_seqs, you want to return your data sorted by length
-    def collate_lines_for_test(self, seq_list, lens):
-        inputs = seq_list.permute(1,0).cpu().numpy()
-    #     lens = [len(seq) for seq in inputs]
-        # sort by length
-        seq_order = sorted(range(len(lens)), key=lens.__getitem__, reverse=True)
-        ordered_inputs = torch.tensor([inputs[i] for i in seq_order]).permute(1,0).cuda()
-        ordered_seq_lens = torch.tensor([lens[i] for i in seq_order]).cuda()
-        reverse_order = sorted(range(len(lens)), key=seq_order.__getitem__, reverse=False)
-        return ordered_inputs, ordered_seq_lens, reverse_order
     
 def run(model, optimizer, criterion, train_dataloader, valid_dataloader, best_epoch, best_vali_loss, DEVICE, start_epoch=None):
     best_eval = None

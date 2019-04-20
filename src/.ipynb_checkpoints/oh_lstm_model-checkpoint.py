@@ -59,7 +59,7 @@ class OhLstm(nn.Module):
         reverse_order = sorted(range(len(lens)), key=seq_order.__getitem__, reverse=False)
         return ordered_inputs, ordered_seq_lens, reverse_order
     
-def run(model, optimizer, criterion, train_dataloader, valid_dataloader, best_epoch, best_vali_loss, DEVICE, start_epoch=None):
+def run(model, optimizer, criterion, train_dataloader, valid_dataloader, best_epoch, best_vali_loss, DEVICE, start_epoch=None, model_prefix=config.model_prefix):
     best_eval = None
     start_epoch = 0 if start_epoch is None else start_epoch
     max_epoch = config.max_epoch
@@ -122,7 +122,7 @@ def run(model, optimizer, criterion, train_dataloader, valid_dataloader, best_ep
             'best_vali_loss': best_vali_loss,
             'best_epoch': best_epoch,
             'optimizer_label_state_dict' : optimizer.state_dict()
-        }, is_best, paths.output_path, filename=config.model_prefix+str(epoch)+'.pth.tar')
+        }, is_best, paths.output_path, filename=model_prefix+str(epoch)+'.pth.tar')
         
         
         end_time = time.time()
